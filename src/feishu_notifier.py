@@ -1,12 +1,13 @@
 """
-飞书告警模块 - 集成 lark-cli 发送消息和图片
+飞书告警模块 - 集成 lark-cli 发送消息
+支持表格形式展示指标
 """
 
 import logging
 import os
 import subprocess
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
 
@@ -20,9 +21,9 @@ class FeishuNotifier:
     
     def __init__(
         self, 
-        enabled: bool = True,
-        chat_id: Optional[str] = None,
-        lark_cli_path: Optional[str] = None
+        enabled=True,
+        chat_id=None,
+        lark_cli_path=None
     ):
         self.enabled = enabled
         self.chat_id = chat_id
@@ -39,29 +40,24 @@ class FeishuNotifier:
         else:
             self._lark_cli_available = False
         
-        logger.info(f"飞书通知器初始化: enabled={enabled}, chat_id={chat_id}, lark_cli={self.lark_cli}, available={self._lark_cli_available}")
+        logger.info("飞书通知器: enabled=%s, chat_id=%s, lark_available=%s",
+                    enabled, chat_id, self._lark_cli_available)
     
-    def _find_lark_cli(self) -> Optional[str]:
+    def _find_lark_cli(self):
         """查找 lark-cli 可执行文件"""
-        # 常见路径
-        possible_paths = [
-            "/Users/frontend/.local/bin/lark-cli",
-            "/opt/homebrew/lib/node_modules/@larksuite/cli/scripts/run.js",
-            "lark-cli",
-        ]
-        
-        # 检查 PATH 中的 lark-cli
         if shutil.which("lark-cli"):
             return "lark-cli"
         
-        # 检查固定路径
+        possible_paths = [
+            "/Users/frontend/.local/bin/lark-cli",
+            "/opt/homebrew/lib/node_modules/@larksuite/cli/scripts/run.js",
+        ]
         for path in possible_paths:
             if os.path.exists(path) and os.access(path, os.X_OK):
                 return path
-        
         return None
     
-    def _check_lark_cli(self) -> bool:
+    def _check_lark_cli(self):
         """检查 lark-cli 是否可用"""
         try:
             result = subprocess.run(
@@ -71,107 +67,242 @@ class FeishuNotifier:
                 timeout=10
             )
             return result.returncode == 0
-        except Exception as e:
-            logger.warning(f"lark-cli 检查失败: {e}")
+        except Exception:
             return False
     
-    def format_alert_message(self, alert: Alert) -> str:
-        """格式化单个告警为飞书消息"""
-        
-        # 图标映射
-        severity_icons = {
-            AlertSeverity.CRITICAL: "🔴",
-            AlertSeverity.WARNING: "🟡",
-            AlertSeverity.INFO: "🔵"
+    def _format_ms(self, ms):
+        """格式化毫秒数"""
+        if ms is None:
+            return "-"
+        if ms < 1000:
+            return "%dms" % ms
+        return "%.1fs" % (ms / 1000.0)
+    
+    def _format_number(self, num):
+        """格式化数字"""
+        if num is None:
+            return "-"
+        return str(num)
+    
+    def _get_status_icon(self, status):
+        """获取状态图标"""
+        status_map = {
+            "success": "✅",
+            "failed": "❌",
+            "timeout": "⏰",
         }
+        return status_map.get(status, "⚪")
+    
+    def format_page_metrics_table(
+        self, 
+        page_results,
+        page_names=None
+    ):
+        """
+        格式化页面指标为表格（markdown 格式）
         
-        icon = severity_icons.get(alert.severity, "⚪")
+        展示：
+        - 页面状态 / HTTP 状态
+        - 加载时间 / DOM Ready
+        - Console 错误 / 警告
+        - 网络错误（4xx/5xx）
+        """
+        page_names = page_names or {}
         
+        # 表头
         lines = [
-            f"{icon} **{alert.title}**",
-            f"",
-            f"**页面**: {alert.page_name or '未知页面'}",
-            f"**URL**: {alert.url}",
-            f"",
-            f"**详情**: {alert.message}",
+            "📊 **页面指标详情**",
+            "",
+            "| 页面 | 状态 | HTTP | 加载 | DOM | 错误 | 警告 | 网络 |",
+            "|------|------|------|------|-----|------|------|------|",
         ]
         
-        if alert.page_result_id:
-            lines.append(f"**结果 ID**: #{alert.page_result_id}")
+        # 数据行
+        for pr in page_results:
+            # 提取页面名称
+            url = pr.get("url", "")
+            page_name = page_names.get(url, "")
+            if not page_name:
+                # 从 URL 中提取简短名称
+                path = url.replace("https://", "").replace("http://", "")
+                parts = path.split("/")
+                page_name = parts[-1] or (parts[-2] if len(parts) > 1 else path)
+                page_name = page_name[:12]
+            
+            status_icon = self._get_status_icon(pr.get("status", "unknown"))
+            http_status = pr.get("http_status", "-")
+            load_time = self._format_ms(pr.get("load_time"))
+            dom_ready = self._format_ms(pr.get("dom_content_loaded"))
+            errors = self._format_number(pr.get("error_count"))
+            warnings = self._format_number(pr.get("warning_count"))
+            net_errors = self._format_number(pr.get("request_error_count"))
+            
+            # 高亮有问题的项
+            if pr.get("error_count", 0) > 0:
+                errors = "🔴" + errors
+            if pr.get("warning_count", 0) > 0:
+                warnings = "🟡" + warnings
+            if pr.get("request_error_count", 0) > 0:
+                net_errors = "🟠" + net_errors
+            
+            lines.append(
+                "| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                    page_name, status_icon, http_status, load_time, dom_ready,
+                    errors, warnings, net_errors
+                )
+            )
         
-        lines.append(f"**时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("")
+        lines.append("**图例**: 🔴错误 | 🟡警告 | 🟠网络错误 | ✅正常")
+        
+        return "\n".join(lines)
+    
+    def format_performance_table(
+        self, 
+        page_results,
+        page_names=None
+    ):
+        """
+        格式化 Lighthouse 性能指标表格
+        
+        如果有 Lighthouse 数据，展示：
+        - Performance 得分
+        - Web Vitals (LCP/FID/CLS/TBT)
+        - Accessibility / Best Practices / SEO 得分
+        """
+        page_names = page_names or {}
+        
+        # 检查是否有 Lighthouse 数据
+        has_lighthouse = any(
+            pr.get("lh_performance_score") is not None for pr in page_results
+        )
+        
+        if not has_lighthouse:
+            return ""
+        
+        lines = [
+            "⚡ **Lighthouse 性能指标**",
+            "",
+            "| 页面 | Perf | A11y | Best | SEO | LCP | CLS | TBT |",
+            "|------|------|------|------|-----|-----|-----|-----|",
+        ]
+        
+        for pr in page_results:
+            url = pr.get("url", "")
+            page_name = page_names.get(url, url[:15])
+            
+            perf = pr.get("lh_performance_score", "-")
+            a11y = pr.get("lh_accessibility_score", "-")
+            best = pr.get("lh_best_practices_score", "-")
+            seo = pr.get("lh_seo_score", "-")
+            lcp = self._format_ms(pr.get("lh_lcp"))
+            cls = pr.get("lh_cls", "-")
+            tbt = self._format_ms(pr.get("lh_tbt"))
+            
+            # 颜色标记
+            if perf != "-" and int(perf) < 50:
+                perf = "🔴" + str(perf)
+            elif perf != "-" and int(perf) < 70:
+                perf = "🟡" + str(perf)
+            
+            lines.append(
+                "| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                    page_name[:10], perf, a11y, best, seo, lcp, cls, tbt
+                )
+            )
+        
+        lines.append("")
+        lines.append("**Web Vitals 阈值**: LCP<2.5s ✅ | CLS<0.1 ✅ | TBT<200ms ✅")
         
         return "\n".join(lines)
     
     def format_summary_message(
         self, 
-        alerts: List[Alert], 
-        run_summary: dict = None
-    ) -> str:
-        """格式化告警摘要消息"""
+        alerts, 
+        run_summary=None,
+        page_results=None,
+        page_names=None
+    ):
+        """
+        格式化完整的巡检摘要消息
         
-        # 统计
-        critical = sum(1 for a in alerts if a.severity == AlertSeverity.CRITICAL)
-        warning = sum(1 for a in alerts if a.severity == AlertSeverity.WARNING)
-        info = sum(1 for a in alerts if a.severity == AlertSeverity.INFO)
+        包含：
+        1. 运行摘要
+        2. 告警统计
+        3. 页面指标表格
+        4. 详细告警列表
+        """
+        lines = []
         
-        lines = [
-            "🚨 **SiteRadar 巡检告警**",
-            "",
-        ]
-        
-        # 摘要统计
-        stats_parts = []
-        if critical > 0:
-            stats_parts.append(f"🔴 严重: {critical}")
-        if warning > 0:
-            stats_parts.append(f"🟡 警告: {warning}")
-        if info > 0:
-            stats_parts.append(f"🔵 信息: {info}")
-        
-        if stats_parts:
-            lines.append(" | ".join(stats_parts))
+        # 标题
+        if alerts:
+            lines.append("🚨 **SiteRadar 巡检告警**")
         else:
-            lines.append("✅ 无告警")
-        
+            lines.append("✅ **SiteRadar 巡检报告**")
         lines.append("")
         
         # 运行摘要
         if run_summary:
-            lines.append(f"📊 **巡检摘要**")
-            lines.append(f"   总页面数: {run_summary.get('total_pages', 0)}")
-            lines.append(f"   成功: {run_summary.get('completed_pages', 0)}")
-            lines.append(f"   失败: {run_summary.get('failed_pages', 0)}")
-            lines.append(f"   耗时: {run_summary.get('duration_seconds', 0)}s")
+            lines.append("📋 **运行摘要**")
+            lines.append("- 总页面数: %d" % run_summary.get('total_pages', 0))
+            lines.append("- 成功: %d" % run_summary.get('completed_pages', 0))
+            lines.append("- 失败: %d" % run_summary.get('failed_pages', 0))
+            lines.append("- 耗时: %ds" % run_summary.get('duration_seconds', 0))
             lines.append("")
+        
+        # 告警统计
+        critical = sum(1 for a in alerts if a.severity == AlertSeverity.CRITICAL)
+        warning = sum(1 for a in alerts if a.severity == AlertSeverity.WARNING)
+        
+        if critical > 0 or warning > 0:
+            stats = []
+            if critical > 0:
+                stats.append("🔴 严重: %d" % critical)
+            if warning > 0:
+                stats.append("🟡 警告: %d" % warning)
+            lines.append("⚠️ **告警统计**: " + " | ".join(stats))
+            lines.append("")
+        
+        # 页面指标表格
+        if page_results:
+            table = self.format_page_metrics_table(page_results, page_names)
+            lines.append(table)
+            lines.append("")
+            
+            # Lighthouse 性能表格（如果有）
+            perf_table = self.format_performance_table(page_results, page_names)
+            if perf_table:
+                lines.append(perf_table)
+                lines.append("")
         
         # 详细告警列表
         if alerts:
-            lines.append("📋 **告警详情**:")
+            lines.append("📝 **详细告警**")
             lines.append("")
-            
-            for i, alert in enumerate(alerts[:10], 1):  # 最多显示 10 个
+            for i, alert in enumerate(alerts[:10], 1):
                 icon = "🔴" if alert.severity == AlertSeverity.CRITICAL else "🟡"
-                lines.append(f"{i}. {icon} **{alert.page_name or '未知'}**")
-                lines.append(f"   {alert.title}")
-                lines.append(f"   {alert.message[:100]}..." if len(alert.message) > 100 else f"   {alert.message}")
-                lines.append(f"   URL: {alert.url}")
+                lines.append("%s **%s**" % (icon, alert.page_name or '未知页面'))
+                lines.append("   - 类型: %s" % alert.title)
+                lines.append("   - 详情: %s..." % alert.message[:80])
+                lines.append("   - URL: %s" % alert.url)
                 lines.append("")
             
             if len(alerts) > 10:
-                lines.append(f"... 还有 {len(alerts) - 10} 个告警")
+                lines.append("... 还有 %d 个告警" % (len(alerts) - 10))
+                lines.append("")
+        
+        # 时间
+        lines.append("⏰ 巡检时间: %s" % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
         return "\n".join(lines)
     
-    def _run_lark_cli(self, args: List[str], cwd: Optional[str] = None) -> dict:
+    def _run_lark_cli(self, args, cwd=None):
         """运行 lark-cli 命令"""
         if not self._lark_cli_available:
             return {"ok": False, "error": "lark-cli 不可用"}
         
         try:
             cmd = [self.lark_cli] + args
-            logger.debug(f"运行 lark-cli: {' '.join(cmd)} (cwd={cwd})")
-            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -179,235 +310,85 @@ class FeishuNotifier:
                 timeout=60,
                 cwd=cwd
             )
-            
-            logger.debug(f"lark-cli 返回: returncode={result.returncode}")
-            logger.debug(f"stdout: {result.stdout}")
-            if result.stderr:
-                logger.debug(f"stderr: {result.stderr}")
-            
             return {
                 "ok": result.returncode == 0,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "returncode": result.returncode
             }
-            
-        except subprocess.TimeoutExpired:
-            logger.error("lark-cli 命令超时")
-            return {"ok": False, "error": "命令超时"}
         except Exception as e:
-            logger.error(f"lark-cli 命令失败: {e}")
             return {"ok": False, "error": str(e)}
     
-    def send_message(self, text: str, chat_id: Optional[str] = None) -> bool:
-        """
-        发送纯文本消息
-        
-        Args:
-            text: 消息内容
-            chat_id: 目标聊天 ID，默认使用初始化时的 chat_id
-            
-        Returns:
-            是否发送成功
-        """
+    def send_message(self, text, chat_id=None):
+        """发送纯文本消息"""
         target_chat = chat_id or self.chat_id
         if not target_chat:
             logger.error("未指定 chat_id")
             return False
         
         if not self.enabled:
-            logger.debug("飞书告警已禁用")
             return False
         
-        logger.info(f"📤 发送飞书消息到 {target_chat}")
+        logger.info("📤 发送飞书消息到 %s", target_chat)
         
-        # 优先使用 lark-cli
         if self._lark_cli_available:
+            # 使用 lark-cli 发送 markdown 格式
             result = self._run_lark_cli([
                 "im", "+messages-send",
                 "--chat-id", target_chat,
-                "--text", text
+                "--markdown", text
             ])
             
             if result["ok"]:
                 logger.info("✅ 消息发送成功 (lark-cli)")
                 return True
             else:
-                logger.warning(f"lark-cli 发送失败: {result.get('error') or result.get('stderr')}，返回消息内容供后续处理")
+                logger.warning("lark-cli 发送失败: %s", result.get('stderr', '')[:100])
         
-        # lark-cli 不可用时，返回消息内容供调用方使用 send_message 工具
-        logger.info("返回消息内容供 send_message 工具发送")
-        return True  # 返回 True 表示消息已准备好
-    
-    def send_image(
-        self, 
-        image_path: str, 
-        text: Optional[str] = None,
-        chat_id: Optional[str] = None
-    ) -> bool:
-        """
-        发送图片消息
-        
-        Args:
-            image_path: 图片路径（绝对路径或相对路径）
-            text: 可选的文字说明
-            chat_id: 目标聊天 ID
-            
-        Returns:
-            是否发送成功
-        """
-        target_chat = chat_id or self.chat_id
-        if not target_chat:
-            logger.error("未指定 chat_id")
-            return False
-        
-        if not self.enabled:
-            logger.debug("飞书告警已禁用")
-            return False
-        
-        if not self._lark_cli_available:
-            logger.error("lark-cli 不可用，无法发送图片")
-            return False
-        
-        # 检查图片文件
-        image_path = os.path.abspath(image_path)
-        if not os.path.exists(image_path):
-            logger.error(f"图片文件不存在: {image_path}")
-            return False
-        
-        logger.info(f"📤 发送图片: {image_path}")
-        
-        # 获取图片所在目录和文件名（lark-cli 需要相对路径）
-        image_dir = os.path.dirname(image_path)
-        image_filename = os.path.basename(image_path)
-        
-        # 构建命令参数
-        args = [
-            "im", "+messages-send",
-            "--chat-id", target_chat,
-            "--image", f"./{image_filename}"
-        ]
-        
-        # 发送图片
-        result = self._run_lark_cli(args, cwd=image_dir)
-        
-        if result["ok"]:
-            logger.info(f"✅ 图片发送成功: {image_filename}")
-            
-            # 如果有文字说明，再发送一条文字消息
-            if text:
-                self.send_message(text, target_chat)
-            
-            return True
-        else:
-            logger.error(f"❌ 图片发送失败: {result.get('error') or result.get('stderr')}")
-            return False
-    
-    def send_multiple_images(
-        self,
-        image_paths: List[str],
-        text: Optional[str] = None,
-        chat_id: Optional[str] = None
-    ) -> int:
-        """
-        发送多张图片
-        
-        Args:
-            image_paths: 图片路径列表
-            text: 可选的文字说明
-            chat_id: 目标聊天 ID
-            
-        Returns:
-            成功发送的图片数量
-        """
-        if not image_paths:
-            return 0
-        
-        success_count = 0
-        
-        # 先发送文字说明（如果有）
-        if text:
-            if self.send_message(text, chat_id):
-                pass  # 成功发送
-        
-        # 逐个发送图片
-        for image_path in image_paths:
-            if self.send_image(image_path, chat_id=chat_id):
-                success_count += 1
-        
-        return success_count
-    
-    def send_alert(self, alert: Alert, screenshot_path: Optional[str] = None) -> bool:
-        """
-        发送单个告警到飞书
-        
-        Args:
-            alert: 告警对象
-            screenshot_path: 可选的截图路径
-            
-        Returns:
-            是否发送成功
-        """
-        if not self.enabled:
-            logger.debug("飞书告警已禁用")
-            return False
-        
-        message = self.format_alert_message(alert)
-        logger.info(f"📤 发送飞书告警: {alert.title}")
-        
-        # 发送文字消息
-        success = self.send_message(message)
-        
-        # 如果有截图，发送截图
-        if screenshot_path and os.path.exists(screenshot_path):
-            self.send_image(screenshot_path, f"📸 {alert.page_name or '截图'}")
-        
-        return success
+        return False
     
     def send_summary(
         self, 
-        alerts: List[Alert], 
-        run_summary: dict = None,
-        always_send: bool = False,
-        screenshot_paths: Optional[List[str]] = None
-    ) -> bool:
+        alerts, 
+        run_summary=None,
+        always_send=False,
+        screenshot_paths=None,
+        page_results=None,
+        page_names=None,
+        send_screenshots=False
+    ):
         """
         发送告警摘要
         
         Args:
             alerts: 告警列表
             run_summary: 运行摘要
-            always_send: 是否总是发送（即使没有告警）
-            screenshot_paths: 截图路径列表
-            
-        Returns:
-            是否发送成功
+            always_send: 是否总是发送
+            screenshot_paths: 截图路径列表（已禁用发送，保留参数兼容）
+            page_results: 页面结果列表（用于表格展示）
+            page_names: 页面 URL 到名称的映射
+            send_screenshots: 是否发送截图（默认 false）
         """
         if not self.enabled:
             return False
         
         # 如果没有告警且不总是发送，则返回
         if not alerts and not always_send:
-            logger.info("ℹ️  无告警，跳过飞书通知")
+            logger.info("ℹ️ 无告警，跳过通知")
             return False
         
-        message = self.format_summary_message(alerts, run_summary)
+        # 生成消息
+        message = self.format_summary_message(
+            alerts=alerts,
+            run_summary=run_summary,
+            page_results=page_results,
+            page_names=page_names
+        )
         
         if alerts:
-            logger.info(f"📤 发送飞书摘要: {len(alerts)} 个告警")
+            logger.info("📤 发送飞书摘要: %d 个告警", len(alerts))
         else:
-            logger.info(f"📤 发送飞书巡检报告（无告警）")
+            logger.info("📤 发送飞书巡检报告（无告警）")
         
-        # 发送文字消息
-        success = self.send_message(message)
-        
-        # 发送截图（最多发送 5 张，避免消息过多）
-        if screenshot_paths:
-            max_screenshots = min(len(screenshot_paths), 5)
-            sent = self.send_multiple_images(
-                screenshot_paths[:max_screenshots],
-                chat_id=self.chat_id
-            )
-            logger.info(f"📸 发送了 {sent}/{max_screenshots} 张截图")
-        
-        return success
+        # 发送消息
+        return self.send_message(message)

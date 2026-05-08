@@ -60,7 +60,7 @@ def cmd_run(args):
     # 显示截图数量
     screenshot_paths = result.get('screenshot_paths', [])
     if screenshot_paths:
-        print(f"📸 截图: {len(screenshot_paths)} 张")
+        print(f"📸 截图: {len(screenshot_paths)} 张（已禁用发送，改用表格展示）")
     
     # 显示告警
     alerts = result.get('alert_list', [])
@@ -69,14 +69,13 @@ def cmd_run(args):
         for i, alert in enumerate(alerts, 1):
             emoji = "🔴" if alert['severity'] == 'critical' else "🟡"
             print(f"  {emoji} [{alert['type']}] {alert['title']}")
-            print(f"     {alert['message']}")
-            print(f"     URL: {alert['url']}")
+            print(f"     {alert['message'][:80]}...")
     else:
         print("\n✅ 没有发现告警")
     
-    # 发送飞书通知（如果有告警或强制发送）
+    # 发送飞书通知
     if not args.no_notify:
-        # 加载配置获取飞书设置
+        # 加载配置
         config = load_config()
         
         notifier = FeishuNotifier(
@@ -87,6 +86,8 @@ def cmd_run(args):
         # 构建 Alert 对象列表
         from src.alerts import Alert, AlertSeverity
         alert_objects = []
+        page_names = {}  # URL 到页面名称的映射
+        
         for a in alerts:
             severity = AlertSeverity.CRITICAL if a['severity'] == 'critical' else AlertSeverity.WARNING
             alert_objects.append(Alert(
@@ -97,6 +98,8 @@ def cmd_run(args):
                 url=a['url'],
                 page_name=a.get('page_name', '')
             ))
+            if a.get('page_name') and a.get('url'):
+                page_names[a['url']] = a['page_name']
         
         # 构建运行摘要
         run_summary = {
@@ -106,43 +109,44 @@ def cmd_run(args):
             'duration_seconds': result['duration_seconds'],
         }
         
-        # 生成消息 - 如果是定时触发，总是发送报告；如果是手动，有告警才发送
+        # 获取页面结果数据（用于表格）
+        page_results = None
+        try:
+            from src.database import db
+            page_results = db.get_page_results(result['run_id'])
+            
+            # 从配置中补充页面名称
+            for site in config.sites:
+                for page in site.pages:
+                    page_names[page.url] = page.name
+        except Exception as e:
+            logger.warning(f"获取页面结果失败: {e}")
+        
         always_send = args.trigger == "scheduled" or args.always_notify
         
-        # 确定要发送的截图
-        screenshots_to_send = []
-        if config.feishu.send_screenshots and screenshot_paths:
-            # 如果有告警，优先发送有告警页面的截图
-            # 否则发送最新的几张截图
-            max_screenshots = config.feishu.max_screenshots
-            screenshots_to_send = screenshot_paths[-max_screenshots:]  # 取最新的几张
-        
         print(f"\n📤 发送飞书通知...")
-        print(f"   截图数量: {len(screenshots_to_send)}/{len(screenshot_paths)}")
+        print(f"   发送截图: 禁用（改用表格展示指标）")
         
         # 使用 FeishuNotifier 发送
         if notifier._lark_cli_available:
-            # lark-cli 可用，直接发送
             success = notifier.send_summary(
                 alerts=alert_objects,
                 run_summary=run_summary,
                 always_send=always_send,
-                screenshot_paths=screenshots_to_send
+                page_results=page_results,
+                page_names=page_names,
+                send_screenshots=False  # 禁用截图发送
             )
             
             if success:
-                print("✅ 飞书通知发送成功！")
+                print("✅ 飞书通知发送成功！（表格形式）")
             else:
-                print("⚠️  无告警，跳过通知")
+                if always_send or alert_objects:
+                    print("⚠️ 发送失败")
+                else:
+                    print("ℹ️ 无告警，跳过通知")
         else:
-            # lark-cli 不可用，返回消息供 send_message 工具发送
-            message = notifier.format_summary_message(alert_objects, run_summary)
-            
-            if always_send or alerts:
-                send_feishu_message(message)
-                print("✅ 飞书通知已准备好（通过 Hermes send_message）")
-            else:
-                print("ℹ️  无告警，跳过通知")
+            print("❌ lark-cli 不可用，无法发送")
     
     return 0
 
