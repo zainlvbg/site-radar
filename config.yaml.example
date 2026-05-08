@@ -1,0 +1,39 @@
+# SiteRadar 配置示例
+# 复制此文件为 config.yaml 并修改配置
+
+# 全局配置
+schedule: "0 */2 * * *"
+max_concurrent: 3
+page_timeout: 60000
+
+alert_channels:
+  - feishu
+
+# 告警阈值
+thresholds:
+  performance:
+    critical_score: 50
+    warning_score: 70
+    lcp_critical: 4000
+    lcp_warning: 2500
+    cls_critical: 0.25
+    cls_warning: 0.1
+    tbt_critical: 600
+    tbt_warning: 200
+  errors:
+    alert_on_console_error: true
+    alert_on_js_exception: true
+    alert_on_network_5xx: true
+    alert_on_network_4xx: false
+
+# 站点配置
+sites:
+  - name: "示例站点"
+    base_url: "https://example.com"
+    is_active: true
+    pages:
+      - name: "首页"
+        url: "https://example.com"
+        check_performance: true
+        check_errors: true
+        capture_screenshot: true
