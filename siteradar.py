@@ -41,7 +41,7 @@ def send_feishu_message(message: str) -> bool:
 
 def cmd_run(args):
     """执行巡检"""
-    print(f"🚀 开始巡检... (触发类型: {args.trigger})")
+    print("🚀 开始巡检... (触发类型: %s)" % args.trigger)
     print("=" * 60)
     
     result = run_check(trigger_type=args.trigger)
@@ -49,29 +49,35 @@ def cmd_run(args):
     print("\n" + "=" * 60)
     print("📊 巡检结果")
     print("=" * 60)
-    print(f"运行 ID: #{result['run_id']}")
-    print(f"状态: {result['status']}")
-    print(f"页面数: {result['total_pages']}")
-    print(f"  成功: {result['completed_pages']}")
-    print(f"  失败: {result['failed_pages']}")
-    print(f"耗时: {result['duration_seconds']}s")
-    print(f"仪表盘: {result['dashboard_path']}")
+    print("运行 ID: #%s" % result['run_id'])
+    print("状态: %s" % result['status'])
+    print("页面数: %s" % result['total_pages'])
+    print("  成功: %s" % result['completed_pages'])
+    print("  失败: %s" % result['failed_pages'])
+    print("耗时: %ss" % result['duration_seconds'])
+    print("仪表盘: %s" % result['dashboard_path'])
     
     # 显示截图数量
     screenshot_paths = result.get('screenshot_paths', [])
     if screenshot_paths:
-        print(f"📸 截图: {len(screenshot_paths)} 张（已禁用发送，改用表格展示）")
+        print("📸 截图: %s 张（已禁用发送，改用表格展示）" % len(screenshot_paths))
+    
+    # 显示错误统计
+    errors_by_page = result.get('errors_by_page', {})
+    if errors_by_page:
+        total_errors = sum(len(errs) for errs in errors_by_page.values())
+        print("🔍 发现错误: %s 个（分布在 %s 个页面）" % (total_errors, len(errors_by_page)))
     
     # 显示告警
     alerts = result.get('alert_list', [])
     if alerts:
-        print(f"\n⚠️  发现 {len(alerts)} 个告警:")
+        print("\n⚠️  触发告警: %s 个:" % len(alerts))
         for i, alert in enumerate(alerts, 1):
             emoji = "🔴" if alert['severity'] == 'critical' else "🟡"
-            print(f"  {emoji} [{alert['type']}] {alert['title']}")
-            print(f"     {alert['message'][:80]}...")
+            print("  %s [%s] %s" % (emoji, alert['type'], alert['title']))
+            print("     %s..." % alert['message'][:80])
     else:
-        print("\n✅ 没有发现告警")
+        print("\n✅ 没有触发告警（部分错误已被过滤）")
     
     # 发送飞书通知
     if not args.no_notify:
@@ -86,7 +92,7 @@ def cmd_run(args):
         # 构建 Alert 对象列表
         from src.alerts import Alert, AlertSeverity
         alert_objects = []
-        page_names = {}  # URL 到页面名称的映射
+        page_names = {}
         
         for a in alerts:
             severity = AlertSeverity.CRITICAL if a['severity'] == 'critical' else AlertSeverity.WARNING
@@ -120,12 +126,12 @@ def cmd_run(args):
                 for page in site.pages:
                     page_names[page.url] = page.name
         except Exception as e:
-            logger.warning(f"获取页面结果失败: {e}")
+            logger.warning("获取页面结果失败: %s" % e)
         
         always_send = args.trigger == "scheduled" or args.always_notify
         
-        print(f"\n📤 发送飞书通知...")
-        print(f"   发送截图: 禁用（改用表格展示指标）")
+        print("\n📤 发送飞书通知...")
+        print("   发送截图: 禁用（改用表格展示指标）")
         
         # 使用 FeishuNotifier 发送
         if notifier._lark_cli_available:
@@ -135,11 +141,12 @@ def cmd_run(args):
                 always_send=always_send,
                 page_results=page_results,
                 page_names=page_names,
-                send_screenshots=False  # 禁用截图发送
+                send_screenshots=False,
+                errors_by_page=errors_by_page  # 传递错误详情
             )
             
             if success:
-                print("✅ 飞书通知发送成功！（表格形式）")
+                print("✅ 飞书通知发送成功！（表格+错误详情）")
             else:
                 if always_send or alert_objects:
                     print("⚠️ 发送失败")

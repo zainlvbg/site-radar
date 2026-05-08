@@ -1,13 +1,12 @@
 """
 飞书告警模块 - 集成 lark-cli 发送消息
-支持表格形式展示指标
+支持表格形式展示指标和具体错误详情
 """
 
 import logging
 import os
 import subprocess
 import shutil
-from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
 
@@ -157,62 +156,78 @@ class FeishuNotifier:
         
         return "\n".join(lines)
     
-    def format_performance_table(
-        self, 
-        page_results,
-        page_names=None
+    def format_error_details(
+        self,
+        errors_by_page,
+        max_errors_per_page=5
     ):
         """
-        格式化 Lighthouse 性能指标表格
+        格式化具体的错误详情
         
-        如果有 Lighthouse 数据，展示：
-        - Performance 得分
-        - Web Vitals (LCP/FID/CLS/TBT)
-        - Accessibility / Best Practices / SEO 得分
+        Args:
+            errors_by_page: 按页面分组的错误列表
+            max_errors_per_page: 每个页面最多展示的错误数
         """
-        page_names = page_names or {}
-        
-        # 检查是否有 Lighthouse 数据
-        has_lighthouse = any(
-            pr.get("lh_performance_score") is not None for pr in page_results
-        )
-        
-        if not has_lighthouse:
+        if not errors_by_page:
             return ""
         
         lines = [
-            "⚡ **Lighthouse 性能指标**",
+            "🔍 **错误详情**",
             "",
-            "| 页面 | Perf | A11y | Best | SEO | LCP | CLS | TBT |",
-            "|------|------|------|------|-----|-----|-----|-----|",
         ]
         
-        for pr in page_results:
-            url = pr.get("url", "")
-            page_name = page_names.get(url, url[:15])
+        for page_name, errors in errors_by_page.items():
+            if not errors:
+                continue
             
-            perf = pr.get("lh_performance_score", "-")
-            a11y = pr.get("lh_accessibility_score", "-")
-            best = pr.get("lh_best_practices_score", "-")
-            seo = pr.get("lh_seo_score", "-")
-            lcp = self._format_ms(pr.get("lh_lcp"))
-            cls = pr.get("lh_cls", "-")
-            tbt = self._format_ms(pr.get("lh_tbt"))
+            lines.append("---")
+            lines.append("**%s**" % page_name)
+            lines.append("")
             
-            # 颜色标记
-            if perf != "-" and int(perf) < 50:
-                perf = "🔴" + str(perf)
-            elif perf != "-" and int(perf) < 70:
-                perf = "🟡" + str(perf)
+            # 显示每个错误
+            for i, error in enumerate(errors[:max_errors_per_page], 1):
+                error_type = error.get("error_type", "unknown")
+                level = error.get("level", "error")
+                message = error.get("message", "")
+                http_status = error.get("http_status")
+                error_url = error.get("url")
+                
+                # 图标
+                if error_type == "console" and level == "error":
+                    icon = "🔴"
+                elif error_type == "console" and level == "warning":
+                    icon = "🟡"
+                elif error_type == "network":
+                    icon = "🟠"
+                elif error_type == "exception":
+                    icon = "💥"
+                else:
+                    icon = "⚪"
+                
+                # 截断长消息
+                display_msg = message[:100]
+                if len(message) > 100:
+                    display_msg += "..."
+                
+                # 构建错误行
+                if http_status:
+                    lines.append("%s **HTTP %s**" % (icon, http_status))
+                    if error_url:
+                        lines.append("   URL: %s" % error_url[:80])
+                else:
+                    lines.append("%s **[%s]**" % (icon, level.upper()))
+                    lines.append("   %s" % display_msg)
+                
+                # 添加空行
+                lines.append("")
             
-            lines.append(
-                "| %s | %s | %s | %s | %s | %s | %s | %s |" % (
-                    page_name[:10], perf, a11y, best, seo, lcp, cls, tbt
-                )
-            )
+            # 如果还有更多错误
+            if len(errors) > max_errors_per_page:
+                lines.append("   ... 还有 %d 个错误未显示" % (len(errors) - max_errors_per_page))
+                lines.append("")
         
-        lines.append("")
-        lines.append("**Web Vitals 阈值**: LCP<2.5s ✅ | CLS<0.1 ✅ | TBT<200ms ✅")
+        if len(lines) <= 2:
+            return ""
         
         return "\n".join(lines)
     
@@ -221,7 +236,8 @@ class FeishuNotifier:
         alerts, 
         run_summary=None,
         page_results=None,
-        page_names=None
+        page_names=None,
+        errors_by_page=None
     ):
         """
         格式化完整的巡检摘要消息
@@ -230,13 +246,23 @@ class FeishuNotifier:
         1. 运行摘要
         2. 告警统计
         3. 页面指标表格
-        4. 详细告警列表
+        4. 具体错误详情
+        5. 详细告警列表
         """
         lines = []
         
         # 标题
-        if alerts:
-            lines.append("🚨 **SiteRadar 巡检告警**")
+        has_errors = False
+        if page_results:
+            for pr in page_results:
+                if (pr.get("error_count", 0) > 0 or 
+                    pr.get("warning_count", 0) > 0 or 
+                    pr.get("request_error_count", 0) > 0):
+                    has_errors = True
+                    break
+        
+        if alerts or has_errors:
+            lines.append("🚨 **SiteRadar 巡检报告**")
         else:
             lines.append("✅ **SiteRadar 巡检报告**")
         lines.append("")
@@ -251,44 +277,46 @@ class FeishuNotifier:
             lines.append("")
         
         # 告警统计
-        critical = sum(1 for a in alerts if a.severity == AlertSeverity.CRITICAL)
-        warning = sum(1 for a in alerts if a.severity == AlertSeverity.WARNING)
-        
-        if critical > 0 or warning > 0:
+        if alerts:
+            critical = sum(1 for a in alerts if a.severity == AlertSeverity.CRITICAL)
+            warning = sum(1 for a in alerts if a.severity == AlertSeverity.WARNING)
+            
             stats = []
             if critical > 0:
                 stats.append("🔴 严重: %d" % critical)
             if warning > 0:
                 stats.append("🟡 警告: %d" % warning)
-            lines.append("⚠️ **告警统计**: " + " | ".join(stats))
-            lines.append("")
+            
+            if stats:
+                lines.append("⚠️ **告警统计**: " + " | ".join(stats))
+                lines.append("")
         
         # 页面指标表格
         if page_results:
             table = self.format_page_metrics_table(page_results, page_names)
             lines.append(table)
             lines.append("")
-            
-            # Lighthouse 性能表格（如果有）
-            perf_table = self.format_performance_table(page_results, page_names)
-            if perf_table:
-                lines.append(perf_table)
+        
+        # 具体错误详情
+        if errors_by_page:
+            error_details = self.format_error_details(errors_by_page)
+            if error_details:
+                lines.append(error_details)
                 lines.append("")
         
         # 详细告警列表
         if alerts:
-            lines.append("📝 **详细告警**")
+            lines.append("📝 **触发告警的错误**")
             lines.append("")
-            for i, alert in enumerate(alerts[:10], 1):
+            for i, alert in enumerate(alerts[:8], 1):
                 icon = "🔴" if alert.severity == AlertSeverity.CRITICAL else "🟡"
                 lines.append("%s **%s**" % (icon, alert.page_name or '未知页面'))
                 lines.append("   - 类型: %s" % alert.title)
                 lines.append("   - 详情: %s..." % alert.message[:80])
-                lines.append("   - URL: %s" % alert.url)
                 lines.append("")
             
-            if len(alerts) > 10:
-                lines.append("... 还有 %d 个告警" % (len(alerts) - 10))
+            if len(alerts) > 8:
+                lines.append("... 还有 %d 个告警" % (len(alerts) - 8))
                 lines.append("")
         
         # 时间
@@ -355,7 +383,8 @@ class FeishuNotifier:
         screenshot_paths=None,
         page_results=None,
         page_names=None,
-        send_screenshots=False
+        send_screenshots=False,
+        errors_by_page=None
     ):
         """
         发送告警摘要
@@ -368,6 +397,7 @@ class FeishuNotifier:
             page_results: 页面结果列表（用于表格展示）
             page_names: 页面 URL 到名称的映射
             send_screenshots: 是否发送截图（默认 false）
+            errors_by_page: 按页面分组的错误详情
         """
         if not self.enabled:
             return False
@@ -382,7 +412,8 @@ class FeishuNotifier:
             alerts=alerts,
             run_summary=run_summary,
             page_results=page_results,
-            page_names=page_names
+            page_names=page_names,
+            errors_by_page=errors_by_page
         )
         
         if alerts:

@@ -81,8 +81,9 @@ class Checker:
         
         completed_pages = 0
         failed_pages = 0
-        all_alerts: List[Alert] = []
-        screenshot_paths: List[str] = []  # 收集所有截图路径
+        all_alerts = []
+        screenshot_paths = []  # 收集所有截图路径
+        errors_by_page = {}  # 按页面收集所有错误详情
         
         try:
             await self.browser.start()
@@ -153,6 +154,19 @@ class Checker:
                         # 保存错误记录
                         error_records = self._save_errors(browser_result, page_result)
                         
+                        # 收集所有错误详情（用于消息展示）
+                        page_errors = []
+                        for rec in error_records:
+                            page_errors.append({
+                                "error_type": rec.error_type,
+                                "level": rec.level,
+                                "message": rec.message,
+                                "url": rec.url,
+                                "http_status": rec.http_status,
+                            })
+                        if page_errors:
+                            errors_by_page[page.name] = page_errors
+                        
                         # 分析告警（使用该页面的阈值）
                         page_alert_engine = AlertEngine(thresholds, self.config.error_filters)
                         page_alerts = page_alert_engine.analyze_page_result(
@@ -209,14 +223,16 @@ class Checker:
                 "duration_seconds": round(duration, 2),
                 "dashboard_path": dashboard_path,
                 "alerts": alert_summary,
-                "screenshot_paths": screenshot_paths,  # 添加截图路径
+                "screenshot_paths": screenshot_paths,
+                "errors_by_page": errors_by_page,  # 所有错误详情
                 "alert_list": [
                     {
                         "type": a.alert_type,
                         "severity": a.severity,
                         "title": a.title,
                         "message": a.message,
-                        "url": a.url
+                        "url": a.url,
+                        "page_name": a.page_name
                     }
                     for a in all_alerts
                 ]
