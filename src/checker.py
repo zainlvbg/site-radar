@@ -71,7 +71,7 @@ class Checker:
         logger.info(f"📋 运行 #{self.current_run_id} 创建完成，共 {total_pages} 个页面")
         
         # 2. 初始化告警引擎（使用全局阈值）
-        self.alert_engine = AlertEngine(self.config.thresholds)
+        self.alert_engine = AlertEngine(self.config.thresholds, self.config.error_filters)
         
         # 3. 初始化浏览器
         self.browser = BrowserInspector(
@@ -82,6 +82,7 @@ class Checker:
         completed_pages = 0
         failed_pages = 0
         all_alerts: List[Alert] = []
+        screenshot_paths: List[str] = []  # 收集所有截图路径
         
         try:
             await self.browser.start()
@@ -111,10 +112,16 @@ class Checker:
                     
                     try:
                         # 执行浏览器巡检
+                        # 使用页面配置的加载策略，默认使用 networkidle
+                        wait_until = page.wait_until or "networkidle"
+                        extra_wait = page.extra_wait if page.extra_wait is not None else 2000
+                        
                         browser_result = await self.browser.inspect_page(
                             url=page.url,
                             capture_screenshot=page.capture_screenshot,
                             screenshot_name=page.name,
+                            wait_until=wait_until,
+                            extra_wait=extra_wait,
                             auth_config=page.auth_config,
                             flow_config=page.flow_config
                         )
@@ -138,11 +145,16 @@ class Checker:
                         page_result_id = db.create_page_result(page_result)
                         page_result.id = page_result_id
                         
+                        # 收集截图路径
+                        if browser_result.screenshot_path and Path(browser_result.screenshot_path).exists():
+                            screenshot_paths.append(browser_result.screenshot_path)
+                            logger.debug(f"📸 收集截图: {browser_result.screenshot_path}")
+                        
                         # 保存错误记录
                         error_records = self._save_errors(browser_result, page_result)
                         
                         # 分析告警（使用该页面的阈值）
-                        page_alert_engine = AlertEngine(thresholds)
+                        page_alert_engine = AlertEngine(thresholds, self.config.error_filters)
                         page_alerts = page_alert_engine.analyze_page_result(
                             page_result, error_records, page.name
                         )
@@ -197,6 +209,7 @@ class Checker:
                 "duration_seconds": round(duration, 2),
                 "dashboard_path": dashboard_path,
                 "alerts": alert_summary,
+                "screenshot_paths": screenshot_paths,  # 添加截图路径
                 "alert_list": [
                     {
                         "type": a.alert_type,

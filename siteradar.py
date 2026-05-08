@@ -19,6 +19,24 @@ from src.checker import run_check, run_check_async
 from src.config import load_config
 from src.database import db
 from src.dashboard import DashboardGenerator
+from src.feishu_notifier import FeishuNotifier
+
+
+def send_feishu_message(message: str) -> bool:
+    """
+    发送消息到飞书
+    
+    注意：这个函数在 Hermes 环境中运行时，可以使用 send_message 工具
+    但在独立运行时，我们只返回消息内容
+    """
+    try:
+        # 尝试使用 Hermes 的 send_message 工具
+        # 这里通过 print 输出消息，供 Hermes cron job 捕获
+        print(f"\n[FEISHU_MESSAGE]\n{message}\n[FEISHU_MESSAGE_END]\n")
+        return True
+    except Exception as e:
+        print(f"发送飞书消息失败: {e}")
+        return False
 
 
 def cmd_run(args):
@@ -39,6 +57,11 @@ def cmd_run(args):
     print(f"耗时: {result['duration_seconds']}s")
     print(f"仪表盘: {result['dashboard_path']}")
     
+    # 显示截图数量
+    screenshot_paths = result.get('screenshot_paths', [])
+    if screenshot_paths:
+        print(f"📸 截图: {len(screenshot_paths)} 张")
+    
     # 显示告警
     alerts = result.get('alert_list', [])
     if alerts:
@@ -50,6 +73,76 @@ def cmd_run(args):
             print(f"     URL: {alert['url']}")
     else:
         print("\n✅ 没有发现告警")
+    
+    # 发送飞书通知（如果有告警或强制发送）
+    if not args.no_notify:
+        # 加载配置获取飞书设置
+        config = load_config()
+        
+        notifier = FeishuNotifier(
+            enabled=True,
+            chat_id=config.feishu.chat_id
+        )
+        
+        # 构建 Alert 对象列表
+        from src.alerts import Alert, AlertSeverity
+        alert_objects = []
+        for a in alerts:
+            severity = AlertSeverity.CRITICAL if a['severity'] == 'critical' else AlertSeverity.WARNING
+            alert_objects.append(Alert(
+                alert_type=a['type'],
+                severity=severity,
+                title=a['title'],
+                message=a['message'],
+                url=a['url'],
+                page_name=a.get('page_name', '')
+            ))
+        
+        # 构建运行摘要
+        run_summary = {
+            'total_pages': result['total_pages'],
+            'completed_pages': result['completed_pages'],
+            'failed_pages': result['failed_pages'],
+            'duration_seconds': result['duration_seconds'],
+        }
+        
+        # 生成消息 - 如果是定时触发，总是发送报告；如果是手动，有告警才发送
+        always_send = args.trigger == "scheduled" or args.always_notify
+        
+        # 确定要发送的截图
+        screenshots_to_send = []
+        if config.feishu.send_screenshots and screenshot_paths:
+            # 如果有告警，优先发送有告警页面的截图
+            # 否则发送最新的几张截图
+            max_screenshots = config.feishu.max_screenshots
+            screenshots_to_send = screenshot_paths[-max_screenshots:]  # 取最新的几张
+        
+        print(f"\n📤 发送飞书通知...")
+        print(f"   截图数量: {len(screenshots_to_send)}/{len(screenshot_paths)}")
+        
+        # 使用 FeishuNotifier 发送
+        if notifier._lark_cli_available:
+            # lark-cli 可用，直接发送
+            success = notifier.send_summary(
+                alerts=alert_objects,
+                run_summary=run_summary,
+                always_send=always_send,
+                screenshot_paths=screenshots_to_send
+            )
+            
+            if success:
+                print("✅ 飞书通知发送成功！")
+            else:
+                print("⚠️  无告警，跳过通知")
+        else:
+            # lark-cli 不可用，返回消息供 send_message 工具发送
+            message = notifier.format_summary_message(alert_objects, run_summary)
+            
+            if always_send or alerts:
+                send_feishu_message(message)
+                print("✅ 飞书通知已准备好（通过 Hermes send_message）")
+            else:
+                print("ℹ️  无告警，跳过通知")
     
     return 0
 
@@ -230,6 +323,10 @@ def main():
     run_parser = subparsers.add_parser("run", help="执行巡检")
     run_parser.add_argument("--trigger", default="manual", choices=["manual", "scheduled"],
                            help="触发类型 (默认: manual)")
+    run_parser.add_argument("--no-notify", action="store_true",
+                           help="不发送飞书通知")
+    run_parser.add_argument("--always-notify", action="store_true",
+                           help="总是发送通知（即使没有告警）")
     run_parser.set_defaults(func=cmd_run)
     
     # dashboard 命令

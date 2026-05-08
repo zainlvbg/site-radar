@@ -63,6 +63,11 @@ class BrowserResult:
     network_errors: List[NetworkError] = field(default_factory=list)
     page_exceptions: List[PageException] = field(default_factory=list)
     
+    # 错误计数
+    error_count: int = 0
+    warning_count: int = 0
+    request_error_count: int = 0
+    
     # 截图
     screenshot_path: Optional[str] = None
     

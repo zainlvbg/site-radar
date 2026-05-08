@@ -68,8 +68,9 @@ class Alert:
 class AlertEngine:
     """告警引擎"""
     
-    def __init__(self, thresholds: AlertThresholds):
+    def __init__(self, thresholds: AlertThresholds, error_filters=None):
         self.thresholds = thresholds
+        self.error_filters = error_filters
         self.alerts: List[Alert] = []
         # 用于去重的缓存 (url + alert_type -> 最近发生时间)
         self._recent_alerts: Dict[str, datetime] = {}
@@ -119,6 +120,12 @@ class AlertEngine:
         
         # 页面状态为 failed 或 timeout
         if result.status in ["failed", "timeout"]:
+            # 检查是否应该忽略超时
+            if self.error_filters and result.status == "timeout":
+                if self.error_filters.should_ignore_timeout(result.url):
+                    logger.info(f"⏭️  忽略超时告警（配置过滤）: {result.url}")
+                    return alerts
+            
             if self._should_alert(result.url, AlertType.SITE_DOWN):
                 alerts.append(Alert(
                     alert_type=AlertType.SITE_DOWN,
@@ -380,6 +387,12 @@ class AlertEngine:
         for error in errors:
             # Console Error
             if error.error_type == "console" and error.level == "error":
+                # 检查是否应该忽略
+                if self.error_filters:
+                    if self.error_filters.should_ignore_console_error(error.message):
+                        logger.debug(f"⏭️  忽略 Console 错误（配置过滤）: {error.message[:50]}...")
+                        continue
+                
                 if t.alert_on_console_error:
                     # 检查是否是新错误（24小时内没有出现过）
                     is_new = db.is_new_error(error.message, error.error_type, hours=24)
@@ -424,6 +437,12 @@ class AlertEngine:
             # Network Error
             elif error.error_type == "network":
                 status = error.http_status or 0
+                
+                # 检查是否应该忽略
+                if self.error_filters:
+                    if self.error_filters.should_ignore_network_error(error.url or "", status):
+                        logger.debug(f"⏭️  忽略网络错误（配置过滤）: HTTP {status} {error.url}")
+                        continue
                 
                 # 5xx 错误
                 if status >= 500:

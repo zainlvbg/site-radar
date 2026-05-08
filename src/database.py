@@ -86,6 +86,9 @@ class PageResult:
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     duration: Optional[int] = None  # ms
+    
+    # 错误信息
+    error_message: Optional[str] = None
 
 
 @dataclass
@@ -177,10 +180,17 @@ class Database:
                     started_at TEXT NOT NULL DEFAULT (datetime('now')),
                     completed_at TEXT,
                     duration INTEGER,
+                    error_message TEXT,
                     
                     FOREIGN KEY (run_id) REFERENCES runs(id)
                 )
             ''')
+            
+            # 为已有数据库添加 error_message 列
+            try:
+                cursor.execute('ALTER TABLE page_results ADD COLUMN error_message TEXT')
+            except:
+                pass
             
             # errors 表：错误记录
             cursor.execute('''
@@ -287,8 +297,8 @@ class Database:
                     dom_content_loaded, screenshot_path, error_count, warning_count, 
                     request_error_count, lh_performance_score, lh_accessibility_score,
                     lh_best_practices_score, lh_seo_score, lh_lcp, lh_fcp, lh_cls,
-                    lh_tbt, lh_si, raw_lighthouse, started_at, completed_at, duration
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lh_tbt, lh_si, raw_lighthouse, started_at, completed_at, duration, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 result.run_id, result.page_id, result.url, result.status,
                 result.http_status, result.load_time, result.dom_content_loaded,
@@ -297,7 +307,8 @@ class Database:
                 result.lh_accessibility_score, result.lh_best_practices_score,
                 result.lh_seo_score, result.lh_lcp, result.lh_fcp, result.lh_cls,
                 result.lh_tbt, result.lh_si, result.raw_lighthouse,
-                result.started_at, result.completed_at, result.duration
+                result.started_at, result.completed_at, result.duration,
+                result.error_message
             ))
             conn.commit()
             return cursor.lastrowid
